@@ -57,3 +57,52 @@ def forward_to_server(raw_request: bytes) -> bytes:
             f"Content-Length: {len(body)}\r\n\r\n"
         ).encode()
         return header + body
+
+# ── Handle satu client ──────────────────────────────────────────────────────
+def handle_client(conn, addr):
+    thread_name = threading.current_thread().name
+    client_ip   = addr[0]
+    t_start     = __import__("time").time()
+
+    try:
+        raw = conn.recv(4096)
+        if not raw:
+            return
+
+        first_line = raw.decode(errors="ignore").split("\r\n")[0]
+        parts = first_line.split()
+        path  = parts[1].split("?")[0] if len(parts) >= 2 else "/"
+
+        # ── Cek cache (HIT) ──────────────────────────────────────────────
+        with cache_lock:
+            if path in cache:
+                conn.sendall(cache[path])
+                elapsed = (__import__("time").time() - t_start) * 1000
+                log(client_ip, path, 200, "HIT", thread_name, elapsed)
+                return
+
+        # ── Cache MISS → forward ke server ───────────────────────────────
+        response    = forward_to_server(raw)
+        status_line = response.split(b"\r\n")[0].decode(errors="ignore")
+        elapsed     = (__import__("time").time() - t_start) * 1000
+
+        if "200" in status_line:
+            with cache_lock:
+                cache[path] = response
+            log(client_ip, path, 200, "MISS", thread_name, elapsed)
+        elif "404" in status_line:
+            log(client_ip, path, 404, "MISS", thread_name, elapsed)
+        elif "504" in status_line:
+            log(client_ip, path, 504, "MISS", thread_name, elapsed)
+        elif "502" in status_line:
+            log(client_ip, path, 502, "MISS", thread_name, elapsed)
+        else:
+            log(client_ip, path, status_line.split()[1] if len(status_line.split()) > 1 else "???", "MISS", thread_name, elapsed)
+
+        conn.sendall(response)
+
+    except Exception as e:
+        print(f"[PROXY] Error {client_ip}: {e}")
+    finally:
+        conn.close()
+
