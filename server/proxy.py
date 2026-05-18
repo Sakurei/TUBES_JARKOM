@@ -106,3 +106,32 @@ def handle_client(conn, addr):
     finally:
         conn.close()
 
+# ── Main ────────────────────────────────────────────────────────────────────
+def start_proxy():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((PROXY_HOST, PROXY_PORT))
+    server.listen(20)
+    print(f"[PROXY] Running on http://{PROXY_HOST}:{PROXY_PORT}")
+    print(f"[PROXY] Forwarding to http://{SERVER_HOST}:{SERVER_PORT}")
+    print(f"[PROXY] Multithreading aktif | Cache enabled")
+
+    conn_count = 0
+    while True:
+        conn, addr = server.accept()
+        conn_count += 1
+        t = threading.Thread(
+            target=handle_client,
+            args=(conn, addr),
+            name=f"ProxyWorker-{conn_count}",
+            daemon=True
+        )
+        print(f"[PROXY] New connection from {addr[0]} → spawning {t.name}")
+        t.start()
+
+if __name__ == "__main__":
+    try:
+        start_proxy()
+    except KeyboardInterrupt:
+        print("\nProxy stopped.")
+        sys.exit(0)
