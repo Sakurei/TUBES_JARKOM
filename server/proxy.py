@@ -1,137 +1,169 @@
 #!/usr/bin/env python3
 """
-proxy.py — Proxy Server dengan Caching
-Port : 8080
-Forward ke Web Server : localhost:8000
+client.py — IFLAB Network Client
+Jalankan: python client.py
+Otomatis: HTTP test, QoS UDP ping, dan 5 client simultan
 """
 import socket
-import threading
+import time
 import sys
-from datetime import datetime
+import math
+import threading
 
 # ── Konfigurasi ────────────────────────────────────────────────────────────
-PROXY_HOST  = "0.0.0.0"
+PROXY_HOST  = "127.0.0.1"
 PROXY_PORT  = 8080
 SERVER_HOST = "127.0.0.1"
-SERVER_PORT = 8000
-TIMEOUT     = 5   # detik
+SERVER_PORT = 9000
+UDP_COUNT   = 10
+UDP_TIMEOUT = 1
 
-# Cache: { path: bytes_response }
-cache      = {}
-cache_lock = threading.Lock()
-
-# ── Log ─────────────────────────────────────────────────────────────────────
-def log(client_ip, url, status, hit_miss, thread_name="", elapsed_ms=0):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[PROXY] {ts} | {client_ip} | {url} | {status} | {hit_miss} | {elapsed_ms:.1f}ms | thread={thread_name}")
-
-# ── Forward request ke web server ──────────────────────────────────────────
-def forward_to_server(raw_request: bytes) -> bytes:
+# ── HTTP Request ────────────────────────────────────────────────────────────
+def http_request(path="/", label=""):
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(TIMEOUT)
-        sock.connect((SERVER_HOST, SERVER_PORT))
-        sock.sendall(raw_request)
+        sock.connect((PROXY_HOST, PROXY_PORT))
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {PROXY_HOST}:{PROXY_PORT}\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode()
 
+        t_start = time.time()
+        sock.sendall(request)
         response = b""
         while True:
             chunk = sock.recv(4096)
             if not chunk:
                 break
             response += chunk
+        elapsed = time.time() - t_start
         sock.close()
-        return response
 
-    except socket.timeout:
-        return (
-            b"HTTP/1.1 504 Gateway Timeout\r\n"
-            b"Content-Type: text/html; charset=utf-8\r\n"
-            b"Content-Length: 28\r\n\r\n"
-            b"<h1>504 Gateway Timeout</h1>"
-        )
+        decoded     = response.decode(errors="ignore")
+        status_line = decoded.split("\r\n")[0]
+        throughput  = (len(response) * 8) / (elapsed * 1000) if elapsed > 0 else 0
+        prefix      = f"[{label}] " if label else ""
+
+        print(f"  {prefix}GET {path:25s} → {status_line} | {elapsed*1000:.1f} ms | {throughput:.1f} kbps")
+        return status_line, elapsed * 1000, len(response)
+
+    except ConnectionRefusedError:
+        print(f"  [ERROR] Tidak bisa konek ke proxy. Pastikan proxy.py jalan.")
+        return "ERROR", 0, 0
     except Exception as e:
-        body   = f"<h1>502 Bad Gateway</h1><p>{e}</p>".encode()
-        header = (
-            f"HTTP/1.1 502 Bad Gateway\r\n"
-            f"Content-Type: text/html; charset=utf-8\r\n"
-            f"Content-Length: {len(body)}\r\n\r\n"
-        ).encode()
-        return header + body
+        print(f"  [ERROR] {e}")
+        return "ERROR", 0, 0
 
-# ── Handle satu client ──────────────────────────────────────────────────────
-def handle_client(conn, addr):
-    thread_name = threading.current_thread().name
-    client_ip   = addr[0]
-    t_start     = __import__("time").time()
+# ── QoS UDP Ping ────────────────────────────────────────────────────────────
+def qos_ping():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(UDP_TIMEOUT)
 
-    try:
-        raw = conn.recv(4096)
-        if not raw:
-            return
+    rtts, jitters, lost, total_bytes = [], [], 0, 0
+    t_start = time.time()
 
-        first_line = raw.decode(errors="ignore").split("\r\n")[0]
-        parts = first_line.split()
-        path  = parts[1].split("?")[0] if len(parts) >= 2 else "/"
+    for seq in range(1, UDP_COUNT + 1):
+        payload = f"Ping {seq} {time.time()}".encode()
+        t_sent  = time.time()
+        try:
+            sock.sendto(payload, (SERVER_HOST, SERVER_PORT))
+            data, _ = sock.recvfrom(1024)
+            rtt = (time.time() - t_sent) * 1000
+            rtts.append(rtt)
+            total_bytes += len(data)
+            if len(rtts) >= 2:
+                jitters.append(abs(rtts[-1] - rtts[-2]))
+            print(f"  Seq {seq:2d}: Reply dari {SERVER_HOST} | RTT = {rtt:.2f} ms")
+        except socket.timeout:
+            print(f"  Seq {seq:2d}: Request timed out")
+            lost += 1
 
-        # ── Cek cache (HIT) ──────────────────────────────────────────────
-        with cache_lock:
-            if path in cache:
-                conn.sendall(cache[path])
-                elapsed = (__import__("time").time() - t_start) * 1000
-                log(client_ip, path, 200, "HIT", thread_name, elapsed)
-                return
+    duration   = time.time() - t_start
+    loss_pct   = (lost / UDP_COUNT) * 100
+    throughput = (total_bytes * 8) / (duration * 1000) if duration > 0 else 0
+    jitter_std = 0.0
+    if len(jitters) > 1:
+        mean_j     = sum(jitters) / len(jitters)
+        jitter_std = math.sqrt(sum((j - mean_j)**2 for j in jitters) / len(jitters))
+    elif len(jitters) == 1:
+        jitter_std = jitters[0]
 
-        # ── Cache MISS → forward ke server ───────────────────────────────
-        response    = forward_to_server(raw)
-        status_line = response.split(b"\r\n")[0].decode(errors="ignore")
-        elapsed     = (__import__("time").time() - t_start) * 1000
+    sock.close()
+    print(f"\n  Statistik  : {UDP_COUNT-lost}/{UDP_COUNT} diterima | Packet Loss: {loss_pct:.1f}%")
+    if rtts:
+        print(f"  Min RTT    : {min(rtts):.2f} ms")
+        print(f"  Avg RTT    : {sum(rtts)/len(rtts):.2f} ms")
+        print(f"  Max RTT    : {max(rtts):.2f} ms")
+    print(f"  Jitter     : {jitter_std:.2f} ms (std dev σ)")
+    print(f"  Throughput : {throughput:.2f} kbps")
 
-        if "200" in status_line:
-            with cache_lock:
-                cache[path] = response
-            log(client_ip, path, 200, "MISS", thread_name, elapsed)
-        elif "404" in status_line:
-            log(client_ip, path, 404, "MISS", thread_name, elapsed)
-        elif "504" in status_line:
-            log(client_ip, path, 504, "MISS", thread_name, elapsed)
-        elif "502" in status_line:
-            log(client_ip, path, 502, "MISS", thread_name, elapsed)
-        else:
-            log(client_ip, path, status_line.split()[1] if len(status_line.split()) > 1 else "???", "MISS", thread_name, elapsed)
+# ── Multi-Client (5 simultan) ───────────────────────────────────────────────
+def multi_client():
+    paths   = ["/index.html", "/osi.html", "/tcpip.html", "/qos.html", "/index.html"]
+    results = {}
+    lock    = threading.Lock()
 
-        conn.sendall(response)
+    def worker(cid, path):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect((PROXY_HOST, PROXY_PORT))
+            request = (
+                f"GET {path} HTTP/1.1\r\n"
+                f"Host: {PROXY_HOST}:{PROXY_PORT}\r\n"
+                f"Connection: close\r\n\r\n"
+            ).encode()
+            t_start = time.time()
+            sock.sendall(request)
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            elapsed = (time.time() - t_start) * 1000
+            sock.close()
+            status = response.split(b"\r\n")[0].decode(errors="ignore")
+            code   = status.split()[1] if len(status.split()) > 1 else "???"
+            with lock:
+                results[cid] = {"path": path, "status": code, "elapsed": elapsed}
+                print(f"  [Client-{cid}] GET {path:25s} → {code} | {elapsed:.1f} ms")
+        except Exception as e:
+            with lock:
+                results[cid] = {"path": path, "status": "ERROR", "elapsed": 0}
+                print(f"  [Client-{cid}] ERROR: {e}")
 
-    except Exception as e:
-        print(f"[PROXY] Error {client_ip}: {e}")
-    finally:
-        conn.close()
+    threads        = [threading.Thread(target=worker, args=(i, paths[i-1]), name=f"Client-{i}") for i in range(1, 6)]
+    t_global_start = time.time()
+    for t in threads: t.start()
+    for t in threads: t.join()
+    total_time = (time.time() - t_global_start) * 1000
+
+    print(f"\n  Semua client selesai dalam {total_time:.1f} ms")
+    print("  (Client-5 request path sama dengan Client-1 → harusnya HIT di proxy)")
 
 # ── Main ────────────────────────────────────────────────────────────────────
-def start_proxy():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((PROXY_HOST, PROXY_PORT))
-    server.listen(20)
-    print(f"[PROXY] Running on http://{PROXY_HOST}:{PROXY_PORT}")
-    print(f"[PROXY] Forwarding to http://{SERVER_HOST}:{SERVER_PORT}")
-    print(f"[PROXY] Multithreading aktif | Cache enabled")
-
-    conn_count = 0
-    while True:
-        conn, addr = server.accept()
-        conn_count += 1
-        t = threading.Thread(
-            target=handle_client,
-            args=(conn, addr),
-            name=f"ProxyWorker-{conn_count}",
-            daemon=True
-        )
-        print(f"[PROXY] New connection from {addr[0]} → spawning {t.name}")
-        t.start()
-
 if __name__ == "__main__":
-    try:
-        start_proxy()
-    except KeyboardInterrupt:
-        print("\nProxy stopped.")
-        sys.exit(0)
+    print("\n" + "="*60)
+    print("  IFLAB Network Client — Auto Run")
+    print("="*60)
+
+    # ── 1. HTTP Test ──────────────────────────────────────────────────────
+    print("\n[1] HTTP REQUEST TEST (via Proxy)")
+    print("-"*60)
+    for path in ["/index.html", "/osi.html", "/missing.html"]:
+        http_request(path)
+
+    # ── 2. QoS UDP Ping ───────────────────────────────────────────────────
+    print("\n[2] QoS UDP PING TEST")
+    print("-"*60)
+    qos_ping()
+
+    # ── 3. Multi-Client Concurrent ────────────────────────────────────────
+    print("\n[3] MULTI-CLIENT CONCURRENT TEST (5 clients simultan)")
+    print("-"*60)
+    multi_client()
+
+    print("\n" + "="*60)
+    print("  Selesai. Cek terminal proxy untuk log HIT/MISS & thread.")
+    print("="*60)
