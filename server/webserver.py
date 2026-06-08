@@ -107,3 +107,59 @@ def handle_client(conn, addr):
         print(f"[HTTP] Error {client_ip}: {e}")
     finally:
         conn.close()
+
+# ── UDP Echo Server (QoS Ping) ──────────────────────────────────────────────
+def start_udp_server():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((UDP_HOST, UDP_PORT))
+    print(f"[UDP]  Echo server running on {UDP_HOST}:{UDP_PORT}")
+
+    conn_count = 0
+    while True:
+        try:
+            data, addr = sock.recvfrom(1024)
+            conn_count += 1
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[UDP]  {ts} | {addr[0]}:{addr[1]} | {len(data)} bytes | seq={conn_count}")
+            sock.sendto(data, addr)  # echo balik payload yang sama
+        except Exception as e:
+            print(f"[UDP]  Error: {e}")
+
+# ── HTTP Server ─────────────────────────────────────────────────────────────
+def start_http_server():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((HTTP_HOST, HTTP_PORT))
+    server.listen(20)
+    print(f"[HTTP] Server running on http://{HTTP_HOST}:{HTTP_PORT}")
+    print(f"[HTTP] Serving files from: {BASE_DIR}")
+    print(f"[HTTP] Multithreading aktif")
+
+    conn_count = 0
+    while True:
+        conn, addr = server.accept()
+        conn_count += 1
+        t = threading.Thread(
+            target=handle_client,
+            args=(conn, addr),
+            name=f"HTTPWorker-{conn_count}",
+            daemon=True
+        )
+        t.start()
+
+# ── Main ────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    print("=" * 60)
+    print("  IFLAB Web Server — HTTP + UDP QoS Echo")
+    print("=" * 60)
+
+    # Jalankan UDP di thread terpisah
+    udp_thread = threading.Thread(target=start_udp_server, name="UDPServer", daemon=True)
+    udp_thread.start()
+
+    # HTTP server di main thread
+    try:
+        start_http_server()
+    except KeyboardInterrupt:
+        print("\nServer stopped.")
+        sys.exit(0)
