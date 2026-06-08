@@ -98,49 +98,6 @@ def qos_ping():
     print(f"  Jitter     : {jitter_std:.2f} ms (std dev σ)")
     print(f"  Throughput : {throughput:.2f} kbps")
 
-# ── Multi-Client (5 simultan) ───────────────────────────────────────────────
-def multi_client():
-    paths   = ["/index.html", "/osi.html", "/tcpip.html", "/qos.html", "/index.html"]
-    results = {}
-    lock    = threading.Lock()
-
-    def worker(cid, path):
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((PROXY_HOST, PROXY_PORT))
-            request = (
-                f"GET {path} HTTP/1.1\r\n"
-                f"Host: {PROXY_HOST}:{PROXY_PORT}\r\n"
-                f"Connection: close\r\n\r\n"
-            ).encode()
-            t_start = time.time()
-            sock.sendall(request)
-            response = b""
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                response += chunk
-            elapsed = (time.time() - t_start) * 1000
-            sock.close()
-            status = response.split(b"\r\n")[0].decode(errors="ignore")
-            code   = status.split()[1] if len(status.split()) > 1 else "???"
-            with lock:
-                results[cid] = {"path": path, "status": code, "elapsed": elapsed}
-                print(f"  [Client-{cid}] GET {path:25s} → {code} | {elapsed:.1f} ms")
-        except Exception as e:
-            with lock:
-                results[cid] = {"path": path, "status": "ERROR", "elapsed": 0}
-                print(f"  [Client-{cid}] ERROR: {e}")
-
-    threads        = [threading.Thread(target=worker, args=(i, paths[i-1]), name=f"Client-{i}") for i in range(1, 6)]
-    t_global_start = time.time()
-    for t in threads: t.start()
-    for t in threads: t.join()
-    total_time = (time.time() - t_global_start) * 1000
-
-    print(f"\n  Semua client selesai dalam {total_time:.1f} ms")
-    print("  (Client-5 request path sama dengan Client-1 → harusnya HIT di proxy)")
 
 # ── Main ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -159,10 +116,6 @@ if __name__ == "__main__":
     print("-"*60)
     qos_ping()
 
-    # ── 3. Multi-Client Concurrent ────────────────────────────────────────
-    print("\n[3] MULTI-CLIENT CONCURRENT TEST (5 clients simultan)")
-    print("-"*60)
-    multi_client()
 
     print("\n" + "="*60)
     print("  Selesai. Cek terminal proxy untuk log HIT/MISS & thread.")
