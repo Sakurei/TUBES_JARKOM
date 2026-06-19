@@ -11,11 +11,11 @@ import math
 import threading
 
 # ── Konfigurasi ────────────────────────────────────────────────────────────
-PROXY_HOST  = "127.0.0.1"
+PROXY_HOST  = "0.0.0.0"
 PROXY_PORT  = 8080
-SERVER_HOST = "127.0.0.1"
+SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 9000
-UDP_COUNT   = 10
+UDP_COUNT   = 1000
 UDP_TIMEOUT = 1
 
 # ── HTTP Request ────────────────────────────────────────────────────────────
